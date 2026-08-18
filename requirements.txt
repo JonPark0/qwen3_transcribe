@@ -1,0 +1,17 @@
+# Core dependencies
+# qwen-asr pins transformers==4.57.6 and accelerate==1.12.0 (also pulls in
+# nagisa/soynlp for the forced aligner's Japanese/Korean tokenizers).
+qwen-asr>=0.0.6
+torch>=2.2.0
+librosa>=0.10.0
+ffmpeg-python>=0.2.0
+soundfile>=0.12.0
+pydub>=0.25.0
+
+# Enhancement with Gemini API
+google-genai>=1.0.0
+python-dotenv>=1.0.0
+
+# Note: Flash Attention 2 and build tools (ninja, psutil, flash-attn) are optional
+# Install with: pip install qwen3-transcribe[flash-attn]
+# Or: pip install -r requirements.txt && pip install flash-attn --no-build-isolation
