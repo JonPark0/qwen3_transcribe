@@ -27,6 +27,7 @@ chat/
 result/
 enhanced/
 output/
+samples/
 
 # AI Generated Files
 *.md

@@ -40,11 +40,6 @@ _HAN_RANGES = (
     (0xF900, 0xFAFF),
 )
 
-# Sentence-ending punctuation (Latin + CJK variants) used to prefer breaking
-# segments at sentence boundaries rather than mid-sentence.
-_SENTENCE_END_CHARS = set(".?!。？！…")
-
-
 def _is_han_char(ch: str) -> bool:
     code = ord(ch)
     return any(lo <= code <= hi for lo, hi in _HAN_RANGES)
@@ -332,13 +327,17 @@ class Qwen3ASRTranscriber:
         Group word/character-level forced-alignment items into sentence-ish
         segments, similar in spirit to Whisper's 30s pipeline chunks.
 
-        A new segment starts whenever any of these trigger on the *previous*
-        item:
-          - previous item's text ends with sentence-terminating punctuation
+        A new segment starts whenever any of these trigger:
           - accumulated segment duration would exceed max_segment_sec
           - accumulated segment character count would exceed max_segment_chars
-          - the gap between previous item's end and this item's start exceeds
-            max_word_gap_sec
+          - the gap between the previous item's end and this item's start
+            exceeds max_word_gap_sec
+
+        Note: there is no punctuation-based sentence-boundary check.
+        Qwen3-ForcedAligner's word tokenizer (Qwen3ForceAlignProcessor
+        .clean_token) strips everything outside Unicode letter/number
+        categories, so `ForcedAlignItem.text` never contains punctuation -
+        checking for it here would always be a no-op.
 
         Args:
             items: List of ForcedAlignItem-like objects with .text/.start_time/.end_time
@@ -378,12 +377,8 @@ class Qwen3ASRTranscriber:
             duration_if_added = end - cur_start
             chars_if_added = sum(len(w) for w in cur_words) + len(text)
 
-            prev_text = cur_words[-1]
-            prev_ends_sentence = prev_text and prev_text[-1] in _SENTENCE_END_CHARS
-
             should_break = (
-                prev_ends_sentence
-                or gap > self.max_word_gap_sec
+                gap > self.max_word_gap_sec
                 or duration_if_added > self.max_segment_sec
                 or chars_if_added > self.max_segment_chars
             )

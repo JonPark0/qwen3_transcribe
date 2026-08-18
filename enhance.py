@@ -7,6 +7,13 @@ import time
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Reconfigure stdio to UTF-8 so the emoji status markers below don't crash
+# with UnicodeEncodeError on Windows consoles using a non-UTF-8 code page
+# (e.g. cp949 for Korean locales). No-op on platforms that are already UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # Import from core modules
 from core import TranscriptEnhancer, format_duration
 

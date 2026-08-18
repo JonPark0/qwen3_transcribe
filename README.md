@@ -35,13 +35,24 @@ things work differently:
   timestamps; `Qwen3ASRTranscriber` lazily loads `Qwen3-ForcedAligner-0.6B`
   only when `enable_timestamps=True`, and only keeps it loaded once loaded.
 - **Timestamps are word-level, reassembled into segments.** The forced
-  aligner returns per-word (or per-Han-character) spans; this library groups
-  them into sentence-ish segments (bounded by punctuation, ~15s duration,
-  ~80 chars, and silence gaps) to match Whisper's segment-level output shape.
+  aligner returns per-word (or per-Han-character) spans with punctuation
+  stripped (its tokenizer keeps only letters/numbers); this library groups
+  them into segments bounded by ~15s duration, ~80 chars, and silence gaps
+  (no sentence-punctuation boundary, since the aligner never returns any) to
+  approximate Whisper's segment-level output shape.
 - **`-lang/--language` forces recognition language** (Qwen3-ASR canonical
   names like `"Korean"`, `"English"`, `"Chinese"` — not ISO codes), separate
   from `-tr/--translate` which only affects the optional Gemini enhancement
   step.
+- **Known limitation - Korean word spacing in timestamped output.** The
+  forced aligner tokenizes Korean with `soynlp`'s `LTokenizer`, which often
+  splits a single eojeol into morphemes (e.g. "안녕하세요" → "안녕" + "하세요").
+  Since this library can't recover which token boundaries were real spaces
+  in the original sentence, it inserts a space at every non-Han word
+  boundary, producing extra spaces around Korean particles/morphemes in
+  `enable_timestamps=True` output (verified: "안녕하세요, 반갑습니다" comes back
+  as "안녕 하세요 반갑 습니다"). Non-timestamped output is unaffected - it uses
+  the ASR model's own text directly, with correct spacing and punctuation.
 
 ## Setup
 
