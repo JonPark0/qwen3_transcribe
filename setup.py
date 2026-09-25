@@ -43,7 +43,7 @@ setup(
     url="https://github.com/JonPark0/qwen3_transcribe",
     packages=find_packages(),
     py_modules=['convert', 'enhance'],
-    python_requires=">=3.9",
+    python_requires=">=3.10",  # qwen-asr -> accelerate==1.12.0 needs 3.10+
     install_requires=core_requirements,
     extras_require={
         "flash-attn": flash_attn_requirements,
@@ -62,7 +62,6 @@ setup(
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Topic :: Multimedia :: Sound/Audio :: Speech",
