@@ -5,11 +5,12 @@ interface of whisper_transcribe's WhisperTranscriber so callers (e.g.
 whisper_webui) can swap engines with minimal changes.
 """
 
+import math
 import time
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any, List, Tuple
+from typing import NamedTuple, Optional, Callable, Dict, Any, List, Tuple
 import torch
 import librosa
 import numpy as np
@@ -20,7 +21,7 @@ try:
 except ImportError:
     HAS_PYDUB = False
 
-from .utils import format_timestamp
+from .utils import SAMPLE_RATE, format_timestamp, load_audio_ffmpeg
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,30 @@ _HAN_RANGES = (
     (0xF900, 0xFAFF),
 )
 
+# Scripts written without inter-word spaces. Used when stitching independently
+# decoded chunks back together: a space is inserted at the seam unless the
+# text on either side is in one of these scripts.
+_NO_SPACE_RANGES = _HAN_RANGES + (
+    (0x3040, 0x30FF),  # Hiragana + Katakana
+    (0x0E00, 0x0E7F),  # Thai
+    (0x3000, 0x303F),  # CJK symbols and punctuation
+    (0xFF00, 0xFFEF),  # Full-width forms
+)
+
+# Upper bound on generated tokens per second of audio, used to size
+# max_new_tokens for a chunk. Dense Korean/Japanese speech measures well under
+# 10 tokens/s with the Qwen3 tokenizer, so this leaves ~2x headroom while still
+# bounding a runaway repetition loop.
+_TOKENS_PER_AUDIO_SEC = 10
+
+
+class _WordSpan(NamedTuple):
+    """Forced-alignment item shifted to absolute time within the loaded audio."""
+    text: str
+    start_time: float
+    end_time: float
+
+
 def _is_han_char(ch: str) -> bool:
     code = ord(ch)
     return any(lo <= code <= hi for lo, hi in _HAN_RANGES)
@@ -48,6 +73,29 @@ def _is_han_char(ch: str) -> bool:
 def _is_han_word(word: str) -> bool:
     """A "word" token counts as Han if every character in it is a Han ideograph."""
     return bool(word) and all(_is_han_char(ch) for ch in word)
+
+
+def _is_no_space_char(ch: str) -> bool:
+    code = ord(ch)
+    return any(lo <= code <= hi for lo, hi in _NO_SPACE_RANGES)
+
+
+def _join_chunk_texts(texts: List[str]) -> str:
+    """
+    Stitch per-chunk transcripts into one string. qwen-asr's own merge uses
+    "".join, which glues Korean/English sentences together across a chunk
+    seam ("...습니다.안녕하세요"); insert a space instead, except around
+    scripts that are written without spaces.
+    """
+    out = ""
+    for text in texts:
+        text = (text or "").strip()
+        if not text:
+            continue
+        if out and not (_is_no_space_char(out[-1]) or _is_no_space_char(text[0])):
+            out += " "
+        out += text
+    return out
 
 
 def _join_words(words: List[str]) -> str:
@@ -88,7 +136,8 @@ class Qwen3ASRTranscriber:
         aligner_model_id: str = "Qwen/Qwen3-ForcedAligner-0.6B",
         language: Optional[str] = None,
         context: str = "",
-        max_new_tokens: int = 1024,
+        max_new_tokens: Optional[int] = None,
+        max_chunk_sec: float = 60.0,
         max_segment_sec: float = 15.0,
         max_segment_chars: int = 80,
         max_word_gap_sec: float = 0.8,
@@ -109,7 +158,22 @@ class Qwen3ASRTranscriber:
                         e.g. "Korean", "English"). None = auto-detect.
             context: Free-form context/hotwords to bias transcription
                         (domain vocabulary, names, etc.)
-            max_new_tokens: Maximum tokens to generate per chunk
+            max_new_tokens: Maximum tokens to generate per chunk. None (default)
+                        sizes it from max_chunk_sec (~10 tokens per second of
+                        audio). A fixed cap that is too small for the chunk
+                        length silently truncates the transcript: qwen-asr's
+                        own ASR chunks are up to 20 minutes long, far more
+                        text than a 512/1024-token cap can hold.
+            max_chunk_sec: Split audio into pieces of at most this many
+                        seconds before inference, cutting at the quietest
+                        point near each boundary (qwen-asr's energy-based
+                        splitter), and decode the pieces in batches of
+                        batch_size. Bounds both VRAM per generate() call and
+                        the text each call must produce, and gives real
+                        progress updates on long files. Capped at 180s when
+                        timestamps are requested (the forced aligner's limit).
+                        Default 60: longer pieces were slower and measurably
+                        more prone to repetition loops (see README).
             max_segment_sec: Max duration of a reconstructed timestamp segment
             max_segment_chars: Max character count of a reconstructed segment
             max_word_gap_sec: Silence gap that forces a new segment
@@ -124,7 +188,8 @@ class Qwen3ASRTranscriber:
         self.aligner_model_id = aligner_model_id
         self.language = language
         self.context = context
-        self.max_new_tokens = max_new_tokens
+        self.max_chunk_sec = max_chunk_sec
+        self.max_new_tokens = max_new_tokens or max(256, math.ceil(max_chunk_sec * _TOKENS_PER_AUDIO_SEC))
         self.max_segment_sec = max_segment_sec
         self.max_segment_chars = max_segment_chars
         self.max_word_gap_sec = max_word_gap_sec
@@ -227,7 +292,14 @@ class Qwen3ASRTranscriber:
         """
         self.log(f"Loading audio: {audio_path}")
 
-        audio = None
+        # Fast path: one ffmpeg call that seeks and decodes only the
+        # requested range straight to 16kHz mono float32.
+        audio = load_audio_ffmpeg(audio_path, start_time, end_time)
+        if audio is not None:
+            duration = len(audio) / float(SAMPLE_RATE)
+            self.log(f"Loaded audio with ffmpeg. Duration: {duration:.2f}s")
+            return audio, duration
+
         original_duration = 0
 
         # Try pydub first for better M4A/AAC support
@@ -456,8 +528,6 @@ class Qwen3ASRTranscriber:
                     'message': 'Starting transcription...'
                 })
 
-            self.log("Running Qwen3-ASR transcription (internal energy-based chunking for long audio)")
-
             want_timestamps = enable_timestamps
             if want_timestamps:
                 try:
@@ -466,7 +536,49 @@ class Qwen3ASRTranscriber:
                     self.log(f"Failed to load forced aligner, falling back to plain text: {e}")
                     want_timestamps = False
 
-            asr_result = self._run_transcribe(audio, want_timestamps)
+            # Split on low-energy boundaries into pieces the model can decode
+            # in one bounded generate() call, then decode batch_size pieces
+            # at a time. Pieces never exceed the aligner's 180s limit when
+            # timestamps are requested, so qwen-asr won't re-split them.
+            from qwen_asr.inference.utils import (
+                MAX_FORCE_ALIGN_INPUT_SECONDS,
+                split_audio_into_chunks,
+            )
+            piece_sec = self.max_chunk_sec
+            if want_timestamps:
+                piece_sec = min(piece_sec, MAX_FORCE_ALIGN_INPUT_SECONDS)
+            pieces = split_audio_into_chunks(audio, SAMPLE_RATE, max_chunk_sec=piece_sec)
+            step = max(1, self.batch_size)
+            total_groups = math.ceil(len(pieces) / step)
+            self.log(
+                f"Running Qwen3-ASR on {len(pieces)} piece(s) of <= {piece_sec:.0f}s "
+                f"in {total_groups} batch(es) of {step}"
+            )
+
+            piece_texts: List[str] = []
+            words: List[_WordSpan] = []
+            for g in range(total_groups):
+                group = pieces[g * step:(g + 1) * step]
+                outputs, ts_ok = self._run_transcribe([w for w, _ in group], want_timestamps)
+                if want_timestamps and not ts_ok:
+                    # Mixed timestamped/untimestamped output would be
+                    # misleading; drop timestamps for the whole file.
+                    want_timestamps = False
+                    words = []
+                for (_, offset), out in zip(group, outputs):
+                    piece_texts.append(out.text)
+                    if want_timestamps and out.time_stamps is not None:
+                        words.extend(
+                            _WordSpan(it.text, float(it.start_time) + offset, float(it.end_time) + offset)
+                            for it in out.time_stamps.items
+                        )
+
+                if progress_callback:
+                    progress_callback({
+                        'stage': 'transcribing',
+                        'progress': 0.2 + 0.7 * (g + 1) / total_groups,
+                        'message': f'Transcribed batch {g + 1}/{total_groups}'
+                    })
 
             # Stage 3: Processing results
             if progress_callback:
@@ -476,8 +588,8 @@ class Qwen3ASRTranscriber:
                     'message': 'Processing transcription results...'
                 })
 
-            if want_timestamps and asr_result.time_stamps is not None and len(asr_result.time_stamps.items) > 0:
-                segments = self._group_words_into_segments(list(asr_result.time_stamps.items))
+            if want_timestamps and words:
+                segments = self._group_words_into_segments(words)
 
                 transcript_lines = []
                 chunks_data = []
@@ -504,7 +616,7 @@ class Qwen3ASRTranscriber:
                 result['text'] = "\n".join(transcript_lines)
                 result['chunks'] = chunks_data
             else:
-                result['text'] = asr_result.text
+                result['text'] = _join_chunk_texts(piece_texts)
 
             result['success'] = True
             result['processing_time'] = time.time() - start_processing_time
@@ -535,28 +647,31 @@ class Qwen3ASRTranscriber:
 
             return result
 
-    def _run_transcribe(self, audio: np.ndarray, want_timestamps: bool):
+    def _run_transcribe(self, wavs: List[np.ndarray], want_timestamps: bool):
         """
-        Call Qwen3ASRModel.transcribe(), retrying without timestamps if the
-        forced aligner rejects the audio/language (e.g. an unsupported
-        script) rather than failing the whole job.
+        Call Qwen3ASRModel.transcribe() on a batch of pieces, retrying without
+        timestamps if the forced aligner rejects the audio/language (e.g. an
+        unsupported script) rather than failing the whole job.
+
+        Returns (results, timestamps_ok).
         """
+        batch = [(w, SAMPLE_RATE) for w in wavs]
         try:
             return self.model.transcribe(
-                audio=(audio, 16000),
+                audio=batch,
                 context=self.context,
                 language=self.language,
                 return_time_stamps=want_timestamps,
-            )[0]
+            ), want_timestamps
         except Exception as e:
             if want_timestamps:
                 self.log(f"Timestamp alignment failed, retrying without timestamps: {e}")
                 return self.model.transcribe(
-                    audio=(audio, 16000),
+                    audio=batch,
                     context=self.context,
                     language=self.language,
                     return_time_stamps=False,
-                )[0]
+                ), False
             raise
 
     def save_transcript(

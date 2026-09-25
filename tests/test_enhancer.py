@@ -110,5 +110,10 @@ class TestTranscriptEnhancer:
         assert "translate" in prompt.lower()
         assert "ko" in prompt
 
+    def test_get_default_prompt_translates_to_english_too(self):
+        """English must not be skipped: the ASR step never translates."""
+        prompt = TranscriptEnhancer(target_language="en").get_default_prompt()
+        assert "translate the enhanced transcript to en" in prompt
+
     # Note: We skip API tests as they require valid API keys
     # Those should be integration tests or mocked tests.

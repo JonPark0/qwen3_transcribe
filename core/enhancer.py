@@ -179,7 +179,9 @@ Important guidelines:
 
 Please provide the enhanced transcript:"""
 
-        if self.target_language and self.target_language != "en":
+        # English is not skipped: the ASR step does not translate (Qwen3-ASR
+        # never does, and whisper-large-v3-turbo ignores task="translate").
+        if self.target_language:
             base_prompt += f"\n\nAdditionally, translate the enhanced transcript to {self.target_language} (ISO 639-1: {self.target_language})."
 
         return base_prompt

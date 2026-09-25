@@ -28,9 +28,18 @@ This is a sibling project of [`whisper_transcribe`](https://github.com/JonPark0/
 Qwen3-ASR is an audio-LLM, not a Seq2Seq encoder-decoder like Whisper, so a few
 things work differently:
 
-- **No manual chunk length.** `qwen-asr` splits long audio internally at
-  low-energy boundaries (up to 20 minutes per ASR call, 3 minutes per forced-
-  alignment call). There's no `-ch/--chunked` flag.
+- **Silence-aligned chunking instead of fixed windows.** Long audio is split
+  at the quietest point near every `max_chunk_sec` seconds (default 60,
+  CLI `--max-chunk-sec`) using `qwen-asr`'s own energy-based splitter, and
+  the pieces are decoded `batch_size` at a time (CLI `-b/--batch-size`).
+  Measured on a 12-minute file (RTX 3060 6 GB, batch 4): 60 s pieces ran at
+  14.5x realtime with 5.1 GB peak; 120 s pieces were 3x slower and produced
+  ~20% repeated text; 180 s pieces produced runaway repetition loops.
+  Left to itself, `qwen-asr` would feed up to 20 minutes of audio into a
+  single `generate()` call, which exhausts VRAM on consumer GPUs (measured:
+  a 12-minute file OOMs on a 6 GB RTX 3060) and can outrun the token budget.
+  `max_new_tokens` is sized from the chunk length automatically. There's
+  still no Whisper-style `-ch/--chunked` flag.
 - **Timestamps require a second model.** Qwen3-ASR itself does not emit
   timestamps; `Qwen3ASRTranscriber` lazily loads `Qwen3-ForcedAligner-0.6B`
   only when `enable_timestamps=True`, and only keeps it loaded once loaded.

@@ -155,6 +155,13 @@ Examples:
     parser.add_argument('-ctx', '--context', type=str, default='',
                        help='Free-form context/hotwords to bias transcription '
                             '(domain vocabulary, names, etc.)')
+    parser.add_argument('--max-chunk-sec', type=float, default=None, metavar='SECONDS',
+                       help='Split long audio at the quietest point near every N seconds and '
+                            'decode the pieces in batches (default: the library default). '
+                            'Lower it if long files run out of GPU memory.')
+    parser.add_argument('-b', '--batch-size', type=int, default=None,
+                       help='Audio pieces decoded per generate() call (default: 4). '
+                            'Lower values reduce VRAM usage.')
     parser.add_argument('-tr', '--translate', type=str, metavar='LANGUAGE',
                        help='Target language for the (optional) Gemini enhancement/translation '
                             'step using ISO 639-1 two-letter codes (e.g., "en", "es", "fr"). '
@@ -194,11 +201,17 @@ Examples:
         print("Warning: Timeout feature is not supported on Windows. Timeout will be ignored.")
         args.timeout = None
 
+    tuning = {}
+    if args.max_chunk_sec:
+        tuning['max_chunk_sec'] = args.max_chunk_sec
+    if args.batch_size:
+        tuning['batch_size'] = args.batch_size
     transcriber = Qwen3ASRTranscriber(
         verbose=args.verbose,
         use_flash_attn=args.flash_attn,
         language=args.language,
         context=args.context,
+        **tuning,
     )
     transcriber.load_model()
 

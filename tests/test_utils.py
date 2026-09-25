@@ -1,8 +1,11 @@
 """Tests for utility functions."""
 
+import shutil
+
+import numpy as np
 import pytest
 from pathlib import Path
-from core.utils import format_timestamp, format_duration, validate_file_path
+from core.utils import format_timestamp, format_duration, load_audio_ffmpeg, validate_file_path
 
 
 class TestFormatTimestamp:
@@ -89,3 +92,31 @@ class TestValidateFilePath:
         result = validate_file_path(test_file, must_exist=True)
         assert isinstance(result, Path)
         assert result.exists()
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+class TestLoadAudioFfmpeg:
+    """Tests for the single-call ffmpeg decoder."""
+
+    @pytest.fixture
+    def wav_path(self, tmp_path):
+        sf = pytest.importorskip("soundfile")
+        path = tmp_path / "tone.wav"
+        # 10s stereo 44.1kHz - exercises downmix + resample
+        t = np.arange(10 * 44100) / 44100.0
+        tone = (0.2 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        sf.write(str(path), np.stack([tone, tone], axis=1), 44100)
+        return path
+
+    def test_full_file_is_16k_mono(self, wav_path):
+        audio = load_audio_ffmpeg(str(wav_path))
+        assert audio.dtype == np.float32
+        assert audio.ndim == 1
+        assert abs(len(audio) - 10 * 16000) < 160
+
+    def test_range_is_decoded_only(self, wav_path):
+        audio = load_audio_ffmpeg(str(wav_path), start_time=2.0, end_time=5.5)
+        assert abs(len(audio) - int(3.5 * 16000)) < 160
+
+    def test_missing_file_returns_none(self, tmp_path):
+        assert load_audio_ffmpeg(str(tmp_path / "missing.mp3")) is None
